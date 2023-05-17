@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Project Tarius: SAM Template To Create A S3 Bucket With A Lambda Function, 
+  Dynamodb Table, Dead Letter Queue, CloudWatch Alarms For Lambda And Sns Topic With Email Subscription.
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+
+Parameters:
+  Environment:
+    Type: String
+    Description: Environment Name
+    Default: devl
+  ProjectName:
+    Type: String
+    Description: Project Name
+    Default: tarius
+  CodeRepositoryS3Bucket:
+    Type: String
+    Description: S3 Bucket containing the project repository 
+    Default: subhamay-projects-repository-us-east-1
+  SNSTopicBaseName:
+    Type: String
+    Description: The Base Name Of The SNS Topic.
+    Default: tarius-sns-topic
+  DLQBaseName:
+    Type: String
+    Description: The Base Name Of The Dead LetterQueue.
+    Default: tarius-sqs-queue
+  LambdaFunctionBaseName: 
+    Type: String
+    Description: The Base Name Of The Lambda Function.
+    Default: tarius-lambda
+  S3LandingZoneBaseName:    
+    Type: String
+    Description: The Base Name Of The S3 Landing Zone Bucket.
+    Default:  tarius-landing-zone
+  DynamoDBTableBaseName:    
+    Type: String
+    Description: The Base Name Of The DynamoDB Table.
+    Default: tarius-product-table
+  KmsMasterKeyAlias:
+    Type: String
+    Description: KMS Key used for encryption
+    Default: SB-KMS
+  KmsMasterKeyId:
+    Type: String
+    Description: The KMS Key Id Used For Encryption.
+    Default:  e4c733c5-9fbe-4a90-bda1-6f0362bc9b89
+  LambdaExecutionRoleName:
+    Type: String
+    Description: The Name Of The Lambda Execution Role.
+    Default:  tarius-lambda-role
+  LambdaExecutionPolicyName:
+    Type: String
+    Description: The Name Of The Lambda Execution Policy.
+    Default:  tarius-lambda-policy
+
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 128
+    Runtime: python3.9
+    Handler: tarius_lambda.lambda_handler
+
+
+Resources:
+  ###################################### SNS Topic With Email Subscription #########################
+  TariusSNSTopic:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${CodeRepositoryS3Bucket}.s3.amazonaws.com/0001-tarius/cft/nested-stacks/sns-stack.yaml'
+      Parameters:  
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        SNSTopicBaseName: !Sub '${SNSTopicBaseName}'
+        SNSTopicDisplayName: "Sns Topic Name For Sending Notification Post Completion Of Data Load Into Dynamodb Table"
+        SNSSubscriptionEmail: subhamay.aws@mailinator.com
+        SNSKmsMasterKeyAlias: !Ref KmsMasterKeyAlias
+      TimeoutInMinutes: 15
+  ###################################### Dead Letter Queue #########################################
+  TariusSQSQueue:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${CodeRepositoryS3Bucket}.s3.amazonaws.com/0001-tarius/cft/nested-stacks/sqs-stack.yaml'
+      Parameters:  
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        QueueName: !Sub '${DLQBaseName}'
+        DelaySeconds: 0
+        KmsMasterKeyAlias: !Ref KmsMasterKeyAlias
+        MaximumMessageSize: 262144
+        MessageRetentionPeriod: 345600
+        ReceiveMessageWaitTimeSeconds: 10
+        VisibilityTimeout: 1
+      TimeoutInMinutes: 15
+  ###################################### S3 Bucket #################################################
+  TariusS3LandingZoneBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['-',[ !Ref S3LandingZoneBaseName, !Ref Environment, !Ref AWS::Region]]
+      BucketEncryption:
+          ServerSideEncryptionConfiguration: 
+          - BucketKeyEnabled: True
+            ServerSideEncryptionByDefault: 
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !Sub 'alias/${KmsMasterKeyAlias}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: ProjectName
+          Value: !Ref ProjectName
+        - Key:  Environment
+          Value: !Ref Environment
+  TariusS3DataBucketCustomResource:
+    DependsOn: 
+      - TariusS3LandingZoneBucket
+    Type: Custom::S3CustomResource
+    Properties:
+      ServiceToken: 
+        Fn::ImportValue: !Sub 'tarius-s3-custom-resource-stack-S3CreateFolderCustomResourceLambdaFunctionArn' 
+      bucket_name: !Join ['-',[ !Ref S3LandingZoneBaseName, !Ref Environment, !Ref AWS::Region]]
+      folders_to_create: 'raw-zone'
+  ###################################### DynamoDB Table ############################################
+  TariusDynamoDBTable:
+    DependsOn:
+         - TariusS3DataBucketCustomResource
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: ID
+        Type: String
+      TableName: !Sub '${DynamoDBTableBaseName}-${Environment}-${AWS::AccountId}'
+      SSESpecification:
+        KMSMasterKeyId: !Sub 'alias/${KmsMasterKeyAlias}'
+        SSEEnabled: Yes
+        SSEType: "KMS"
+      Tags:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+  ###################################### Lambda Execution Role #####################################
+  TariusLambdaIAMRole:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${CodeRepositoryS3Bucket}.s3.amazonaws.com/0001-tarius/cft/nested-stacks/iam-role-stack.yaml'
+      Parameters:  
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        S3LandingZoneBucketBaseName: !Ref S3LandingZoneBaseName 
+        LambdaFunctionBaseName: !Ref LambdaFunctionBaseName
+        LambdaExecutionRoleName: !Ref LambdaExecutionRoleName
+        LambdaExecutionPolicyName: !Ref LambdaExecutionPolicyName 
+        DynamoDBTableBaseName: !Ref DynamoDBTableBaseName
+        SNSTopicBaseName: !Ref SNSTopicBaseName
+        SQSQueueBaseName: !Ref DLQBaseName
+        KmsMasterKeyId: !Ref KmsMasterKeyId
+      TimeoutInMinutes: 15
+  ###################################### Lambda Function ###########################################
+  TariusLambdaFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      FunctionName: !Sub '${LambdaFunctionBaseName}-${Environment}-${AWS::Region}'
+      CodeUri: tarius_code/
+      Role: !GetAtt TariusLambdaIAMRole.Outputs.LambdaExecutionRoleArn
+      Environment:
+        Variables:
+            SNS_TOPIC_ARN: !GetAtt TariusSNSTopic.Outputs.SNSTopicArn
+            DYNAMODB_TABLE_NAME: !Join ['-', [!Ref DynamoDBTableBaseName, !Ref Environment, !Ref 'AWS::Region']]
+      DeadLetterQueue:
+          TargetArn: !GetAtt TariusSQSQueue.Outputs.SQSQueueArn
+          Type: SQS
+      Architectures:
+        - x86_64
+      Events:
+        S3EventNotification:
+          Type: S3
+          Properties:
+            Bucket: !Ref TariusS3LandingZoneBucket
+            Events: s3:ObjectCreated:*
+            Filter: 
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: raw-zone
+                  - Name: suffix
+                    Value: '.txt'
+      Tags:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+                  
+              
+  ##################################### CloudWatch Alarms #########################################
+  TariusCloudWatchAlarms:
+    DependsOn:
+      - TariusLambdaFunction
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${CodeRepositoryS3Bucket}.s3.amazonaws.com/0001-tarius/cft/nested-stacks/cloudwatch-stack.yaml'
+      Parameters:  
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        LambdaFunctionName: !Sub '${LambdaFunctionBaseName}-${Environment}-${AWS::Region}'
+        SNSTopicName: !Sub '${SNSTopicBaseName}-${Environment}-${AWS::Region}'
+        AlarmNameLambdaInvocations: !Sub '${LambdaFunctionBaseName}-invocations-alarm'
+        AlarmThresholdLambdaInvocations: 5
+        AlarmPeriodInSecondsLambdaInvocations: 900
+        DatapointsToAlarmLambdaInvocations: 1
+        EvaluationPeriodsForLambdaInvocations: 1
+        AlarmComparisonOperatorLambdaInvocations: GreaterThanOrEqualToThreshold
+        AlarmNameLambdaErrors: !Sub '${LambdaFunctionBaseName}-errors-alarm'
+        AlarmThresholdLambdaErrors: 2
+        AlarmPeriodInSecondsLambdaErrors: 900
+        DatapointsToAlarmLambdaErrors: 1
+        EvaluationPeriodsForLambdaErrors: 1
+        AlarmComparisonOperatorLambdaErrors: GreaterThanOrEqualToThreshold
+        AlarmNameLambdaThrottles: !Sub '${LambdaFunctionBaseName}-throttles-alarm'
+        AlarmThresholdLambdaThrottles: 3
+        AlarmPeriodInSecondsLambdaThrottles: 600
+        DatapointsToAlarmLambdaThrottles: 1
+        EvaluationPeriodsForLambdaThrottles: 1
+        AlarmComparisonOperatorLambdaThrottles: GreaterThanOrEqualToThreshold
+        AlarmNameLambdaDuration: !Sub '${LambdaFunctionBaseName}-duration-alarm'
+        AlarmThresholdLambdaDuration: 500
+        AlarmPeriodInSecondsLambdaDuration: 900
+        DatapointsToAlarmLambdaDuration: 1
+        EvaluationPeriodsForLambdaDuration: 1
+        AlarmComparisonOperatorLambdaDuration: GreaterThanOrEqualToThreshold
+        AlarmNameLambdaConcurrentExecutions: !Sub '${LambdaFunctionBaseName}-conc-exec-alarm'
+        AlarmThresholdLambdaConcurrentExecutions: 3
+        AlarmPeriodInSecondsLambdaConcurrentExecutions: 60
+        DatapointsToAlarmLambdaConcurrentExecutions: 1
+        EvaluationPeriodsForLambdaConcurrentExecutions: 1
+        AlarmComparisonOperatorLambdaConcurrentExecutions: GreaterThanOrEqualToThreshold
+      TimeoutInMinutes: 5
+Outputs:
+  TariusSNSTopicArn:
+    Description: "Tarius SNS Topic Arn"
+    Value: !GetAtt TariusSNSTopic.Outputs.SNSTopicArn
+  TariusSNSTopicSubscriptionArn:
+    Description: "Tarius SNS Topic Arn"
+    Value: !GetAtt TariusSNSTopic.Outputs.SNSSubscriptionArn
+  TariusDeadLetterQueueArn:
+    Description: Tarius Dead Letter Queue Arn
+    Value: !GetAtt TariusSQSQueue.Outputs.SQSQueueArn
+  TariusDeadLetterQueueUrl:
+    Description: Tarius Dead Letter Queue URL
+    Value: !GetAtt TariusSQSQueue.Outputs.SQSQueueURL
+  TariusS3BucketArn:
+    Description: Tarius S3 Bucket Arn
+    Value: !GetAtt TariusS3LandingZoneBucket.Arn
+  TariusDynamoDBTableArn:
+    Description: "Tarius DynamoDB Arn"
+    Value: !GetAtt TariusDynamoDBTable.Arn
+  TariusLambdaExecutionRoleArn:
+    Description: "Tarius Lambda Function Execution Role Arn"
+    Value: !GetAtt TariusLambdaIAMRole.Outputs.LambdaExecutionRoleArn
+  TariusLambdaFunction:
+    Description: "Tarius Lambda Function Arn"
+    Value: !GetAtt TariusLambdaFunction.Arn
+  TaiusLambdaInvocationsAlarmArn:
+    Description: Tarius Lambda Invocations Alarm Arn 
+    Value: !GetAtt TariusCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaInvocationsArn
+  TaiusLambdaErrorsAlarmArn:
+    Description: Tarius Lambda Errors Alarm Arn 
+    Value: !GetAtt TariusCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaErrorsArn
+  TaiusLambdaThrottlesAlarmArn:
+    Description: Tarius Lambda Throttles Alarm Arn 
+    Value: !GetAtt TariusCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaThrottlesArn
+  TaiusLambdaDurationAlarmArn:
+    Description: Tarius Lambda Duration Alarm Arn 
+    Value: !GetAtt TariusCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaDurationArn
+  TaiusLambdaConcurrentExecutionsAlarmArn:
+    Description: Tarius Lambda Concurrent Executions Alarm Arn 
+    Value: !GetAtt TariusCloudWatchAlarms.Outputs.CloudWatchAlarmLambdaConurrentExecutionsArn
+

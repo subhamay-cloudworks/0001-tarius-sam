@@ -1,0 +1,13 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "tarius-sam-stack"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-e4e0k7l11zg1"
+s3_prefix = "tarius-sam-stack"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_NAMED_IAM"
+image_repositories = []
+parameter_overrides = "Environment=\"devl\" ProjectName=\"tarius\" RepositoryS3Bucket=\"subhamay-projects-repository-us-east-1\" SNSTopicBaseName=\"tarius-sns-topic\" DLQBaseName=\"tarius-sqs-queue\" LambdaFunctionBaseName=\"tarius-lambda\" S3LandingZoneBaseName=\"tarius-landing-zone\" DynamoDBTableBaseName=\"tarius-product-table\" KmsMasterKeyAlias=\"SB-KMS\" KmsMasterKeyId=\"e4c733c5-9fbe-4a90-bda1-6f0362bc9b89\" LambdaExecutionRoleName=\"tarius-lambda-role\" LambdaExecutionPolicyName=\"tarius-lambda-policy\""
+disable_rollback = true
